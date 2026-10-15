@@ -1,9 +1,12 @@
-name: Build
+name: Build and Release
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   web:
@@ -20,10 +23,11 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npm run build
+      - run: tar -czf liuying-web-dist.tar.gz -C dist .
       - uses: actions/upload-artifact@v4
         with:
           name: web-dist
-          path: web/dist
+          path: web/liuying-web-dist.tar.gz
 
   api:
     runs-on: ubuntu-latest
@@ -39,10 +43,27 @@ jobs:
           cache-dependency-path: api/package-lock.json
       - run: npm ci
       - run: npm run build
+      - run: tar -czf liuying-api-dist.tar.gz dist package.json package-lock.json
       - uses: actions/upload-artifact@v4
         with:
           name: api-dist
-          path: |
-            api/dist
-            api/package.json
-            api/package-lock.json
+          path: api/liuying-api-dist.tar.gz
+
+  release:
+    needs: [web, api]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - run: |
+          cp deploy/deploy.sh deploy/liuying-api.service deploy/Caddyfile api/sources.json.example assets/
+          ls -la assets/
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: 最新构建
+          make_latest: true
+          files: assets/*
