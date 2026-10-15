@@ -47,18 +47,15 @@ cd web && npm install && npm run dev
 ## 部署
 
 ```bash
-# 1. 从 Actions 下载 web-dist / api-dist
-# 2. 前端
-sudo mkdir -p /srv/liuying/web && sudo cp -r web-dist/* /srv/liuying/web/
-# 3. 后端
-sudo mkdir -p /srv/liuying/api && sudo cp -r api-dist/* /srv/liuying/api/
-cd /srv/liuying/api && sudo npm ci --omit=dev
-sudo cp sources.json.example sources.json  # 填入你的源
-sudo useradd -r -s /usr/sbin/nologin liuying
-sudo chown -R liuying:liuying /srv/liuying/api
-# 4. systemd
-sudo cp deploy/liuying-api.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now liuying-api
-# 5. Caddy (改好 deploy/Caddyfile 里的域名)
-sudo cp deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+# 1. 从 Actions 下载 web-dist / api-dist, 解压到某处 (假设都在 ~/release 下)
+# 2. 一键部署 (Caddy 手动配置, 参考 deploy/Caddyfile)
+sudo ./deploy/deploy.sh --dir /srv/liuying \
+  --web-dist ~/release/web-dist \
+  --api-dist ~/release/api-dist
+# 3. 填源: 编辑 /srv/liuying/api/sources.json, 然后
+sudo systemctl restart liuying-api
 ```
+
+脚本会: 拷贝前端到 `<dir>/web`, 后端到 `<dir>/api` 并 `npm ci --omit=dev`,
+首次生成 `sources.json` (不覆盖已有), 按 `--dir/--user/--port` 生成 systemd
+单元并启动。查看状态: `systemctl status liuying-api`, 日志: `journalctl -u liuying-api -f`。

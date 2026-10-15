@@ -4,13 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=liuying
-WorkingDirectory=/srv/liuying/api
+User=@USER@
+WorkingDirectory=@DIR@/api
 ExecStart=/usr/bin/node dist/index.js
 Environment=NODE_ENV=production
-Environment=PORT=3000
-# 敏感配置走 EnvironmentFile, 不要写进 unit 文件
-# EnvironmentFile=/srv/liuying/api/.env
+Environment=PORT=@PORT@
 Restart=always
 RestartSec=5
 
