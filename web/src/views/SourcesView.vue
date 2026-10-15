@@ -12,7 +12,10 @@
       @change="saveToken"
     />
 
-    <v-btn color="primary" prepend-icon="mdi-plus" class="mb-4" @click="openAdd">添加源</v-btn>
+    <div class="d-flex ga-2 mb-4">
+      <v-btn color="primary" prepend-icon="mdi-plus" @click="openAdd">添加源</v-btn>
+      <v-btn variant="tonal" prepend-icon="mdi-playlist-plus" @click="openBatch">批量导入</v-btn>
+    </div>
 
     <v-list lines="two" class="rounded-lg">
       <v-list-item v-for="s in sources" :key="s.id" :title="s.name" :subtitle="s.api">
@@ -61,12 +64,56 @@
       </v-card>
     </v-dialog>
 
+    <v-dialog v-model="batchDialog" max-width="560">
+      <v-card>
+        <v-card-title>批量导入源</v-card-title>
+        <v-tabs v-model="batchTab" grow>
+          <v-tab value="text">粘贴文本</v-tab>
+          <v-tab value="url">从 URL 导入</v-tab>
+        </v-tabs>
+        <v-card-text>
+          <template v-if="batchTab === 'text'">
+            <v-textarea
+              v-model="batchText"
+              label="每行一个: 名称,接口地址"
+              placeholder="源A,https://example.com/api.php/provide/vod&#10;源B,https://example.org/api.php/provide/vod"
+              rows="6"
+              density="comfortable"
+            />
+            <div class="text-caption text-medium-emphasis">
+              可识别 {{ batchList.length }} 个{{ batchImporting ? `, 已导入 ${batchDone}` : '' }}
+            </div>
+          </template>
+          <template v-else>
+            <v-text-field
+              v-model="batchUrl"
+              label="JSON 地址"
+              placeholder="https://example.com/sources.json"
+              density="comfortable"
+            />
+            <div class="text-caption text-medium-emphasis">
+              由服务端拉取解析, 支持 JSON 数组 [{name, api}] 或 {sources:[...]} 格式
+            </div>
+          </template>
+          <v-alert v-if="batchError" type="error" variant="tonal" class="mt-2">{{ batchError }}</v-alert>
+          <v-alert v-if="batchDoneMsg" type="success" variant="tonal" class="mt-2">
+            {{ batchDoneMsg }}
+          </v-alert>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="batchDialog = false">关闭</v-btn>
+          <v-btn color="primary" :loading="batchImporting" @click="doBatchImport">导入</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <v-snackbar v-model="snackbar" :timeout="2500">{{ snackbarText }}</v-snackbar>
   </v-container>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { adminToken, api, type SourceInfo } from '../api'
 
 const sources = ref<SourceInfo[]>([])
@@ -167,6 +214,72 @@ async function doDelete() {
     snackbar.value = true
   } finally {
     saving.value = false
+  }
+}
+
+// 批量导入
+const batchDialog = ref(false)
+const batchTab = ref<'text' | 'url'>('text')
+const batchText = ref('')
+const batchUrl = ref('')
+const batchImporting = ref(false)
+const batchDone = ref(0)
+const batchError = ref('')
+const batchDoneMsg = ref('')
+
+const batchList = computed(() =>
+  batchText.value
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const parts = line.split(/[,，\s]+/).filter(Boolean)
+      if (parts.length < 2) return null
+      const apiUrl = parts.pop()!
+      return { name: parts.join(' '), api: apiUrl }
+    })
+    .filter((x): x is { name: string; api: string } => !!x),
+)
+
+function openBatch() {
+  batchText.value = ''
+  batchUrl.value = ''
+  batchError.value = ''
+  batchDoneMsg.value = ''
+  batchDone.value = 0
+  batchDialog.value = true
+}
+
+async function doBatchImport() {
+  batchError.value = ''
+  batchDoneMsg.value = ''
+  batchImporting.value = true
+  batchDone.value = 0
+  try {
+    if (batchTab.value === 'url') {
+      if (!batchUrl.value.trim()) throw new Error('请填写 URL')
+      const r = await api.importSourcesUrl(batchUrl.value.trim())
+      batchDoneMsg.value = `导入完成, 新增 ${r.added} 个源`
+    } else {
+      const list = batchList.value
+      if (!list.length) throw new Error('没有可识别的行 (格式: 名称,接口地址)')
+      let ok = 0
+      for (const it of list) {
+        try {
+          await api.addSource(it.name, it.api)
+          ok++
+        } catch {
+          /* 单个失败跳过, 继续 */
+        }
+        batchDone.value = ok
+      }
+      batchDoneMsg.value = `导入完成, 成功 ${ok}/${list.length} 个`
+    }
+    await load()
+  } catch (e: any) {
+    batchError.value = e.message
+  } finally {
+    batchImporting.value = false
   }
 }
 

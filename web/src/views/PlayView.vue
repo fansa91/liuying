@@ -46,6 +46,7 @@ import { api, type Episode, type VideoDetail } from '../api'
 import Player from '../components/Player.vue'
 import { findHistory, saveHistory } from '../history'
 import { settings } from '../settings'
+import { queueSync } from '../sync'
 
 const route = useRoute()
 const router = useRouter()
@@ -88,6 +89,8 @@ function recordHistory(position: number) {
     position,
     updatedAt: Date.now(),
   })
+  // 有账号登录时, 播放记录变动后自动同步
+  queueSync()
 }
 
 function onPosition(p: { url: string; position: number }) {

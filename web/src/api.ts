@@ -36,15 +36,19 @@ async function get<T>(path: string): Promise<T> {
   return r.json()
 }
 
-function adminHeaders(): HeadersInit {
-  const t = localStorage.getItem('liuying-admin-token') ?? ''
-  return t ? { 'x-admin-token': t } : {}
+function authHeaders(): HeadersInit {
+  const h: Record<string, string> = {}
+  const t = localStorage.getItem('liuying-token') ?? ''
+  if (t) h['Authorization'] = `Bearer ${t}`
+  const at = localStorage.getItem('liuying-admin-token') ?? ''
+  if (at) h['x-admin-token'] = at
+  return h
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(`/api${path}`, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...adminHeaders(), ...(init?.headers ?? {}) },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(), ...(init?.headers ?? {}) },
   })
   if (!r.ok) {
     const body = await r.json().catch(() => null)
@@ -93,5 +97,11 @@ export const api = {
     req<{ ok: boolean; types?: number; error?: string }>('/sources/test', {
       method: 'POST',
       body: JSON.stringify({ api }),
+    }),
+  /** 从 URL 批量导入源列表 (服务端拉取解析) */
+  importSourcesUrl: (url: string) =>
+    req<{ added: number }>('/sources/import-url', {
+      method: 'POST',
+      body: JSON.stringify({ url }),
     }),
 }

@@ -43,3 +43,14 @@ watch(
   },
   { deep: true },
 )
+
+const TS_KEY = 'liuying-settings-ts'
+/** 设置的最后修改时间, 供同步用 */
+export const getSettingsTs = (): number => Number(localStorage.getItem(TS_KEY) ?? 0)
+export const setSettingsTs = (t: number): void => {
+  try {
+    localStorage.setItem(TS_KEY, String(t))
+  } catch {
+    /* ignore */
+  }
+}

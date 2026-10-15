@@ -31,7 +31,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import QueuedImage from '../components/QueuedImage.vue'
 import {
@@ -63,7 +63,14 @@ function clearAll() {
   refresh()
 }
 
-onMounted(refresh)
+onMounted(() => {
+  refresh()
+  // 其他设备同步下来的历史变更, 自动刷新列表
+  window.addEventListener('liuying-history-changed', refresh)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('liuying-history-changed', refresh)
+})
 </script>
 
 <style scoped>

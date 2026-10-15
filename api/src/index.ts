@@ -1,19 +1,112 @@
+import { randomUUID } from 'node:crypto'
 import { serve } from '@hono/node-server'
 import { Hono, type Context, type Next } from 'hono'
 import { cors } from 'hono/cors'
+import { createToken, createUser, getUserByToken, revokeToken, verifyUser } from './auth.js'
+import { db } from './db.js'
 import { store, type VodSource } from './sources.js'
 
-const app = new Hono()
+const app = new Hono<{ Variables: { userId?: string; username?: string } }>()
 app.use('/api/*', cors())
 
-/** 写操作鉴权: 设置了 ADMIN_TOKEN 才强制要求 x-admin-token 请求头 */
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? ''
+
 async function admin(c: Context, next: Next) {
   if (ADMIN_TOKEN && c.req.header('x-admin-token') !== ADMIN_TOKEN) {
     return c.json({ error: 'unauthorized' }, 401)
   }
   await next()
 }
+
+/** 解析 Bearer token, 有效则注入 userId/username (可选鉴权, 匿名可过) */
+async function authOptional(c: Context, next: Next) {
+  const m = (c.req.header('authorization') ?? '').match(/^Bearer (.+)$/)
+  if (m) {
+    const u = getUserByToken(m[1])
+    if (u) {
+      c.set('userId', u.id)
+      c.set('username', u.username)
+    }
+  }
+  await next()
+}
+app.use('/api/*', authOptional)
+
+async function authRequired(c: Context, next: Next) {
+  if (!c.get('userId')) return c.json({ error: 'unauthorized' }, 401)
+  await next()
+}
+
+/** 源写操作: 登录用户改自己的列表, 未登录走 ADMIN_TOKEN */
+async function sourceWrite(c: Context, next: Next) {
+  if (c.get('userId')) {
+    await next()
+    return
+  }
+  await admin(c, next)
+}
+
+const userIdOf = (c: Context): string | undefined => c.get('userId')
+
+// ---------------------------------------------------------------------------
+// 源存储抽象: 登录用户走 user_sources 表 (天然多端一致), 未登录走全局 sources.json
+// ---------------------------------------------------------------------------
+interface UserSource {
+  id: string
+  name: string
+  api: string
+}
+
+function sourceOps(userId?: string) {
+  if (!userId) {
+    return {
+      list: (): UserSource[] => store.all(),
+      get: (id: string): UserSource | undefined => store.get(id),
+      upsert: (s: UserSource) => store.upsert({ ...s, timeoutMs: 15000 }),
+      remove: (id: string): boolean => store.remove(id),
+    }
+  }
+  const now = () => Date.now()
+  return {
+    list: (): UserSource[] =>
+      db
+        .prepare(
+          'SELECT source_id AS id, name, api FROM user_sources WHERE user_id = ? ORDER BY sort, rowid',
+        )
+        .all(userId) as UserSource[],
+    get: (id: string): UserSource | undefined =>
+      db
+        .prepare(
+          'SELECT source_id AS id, name, api FROM user_sources WHERE user_id = ? AND source_id = ?',
+        )
+        .get(userId, id) as UserSource | undefined,
+    upsert: (s: UserSource) => {
+      const row = db
+        .prepare('SELECT id FROM user_sources WHERE user_id = ? AND source_id = ?')
+        .get(userId, s.id) as any
+      if (row) {
+        db.prepare('UPDATE user_sources SET name = ?, api = ?, updated_at = ? WHERE id = ?').run(
+          s.name,
+          s.api,
+          now(),
+          row.id,
+        )
+      } else {
+        const m = db
+          .prepare('SELECT COALESCE(MAX(sort), -1) AS m FROM user_sources WHERE user_id = ?')
+          .get(userId) as any
+        db.prepare(
+          'INSERT INTO user_sources(id, user_id, source_id, name, api, sort, updated_at) VALUES(?,?,?,?,?,?,?)',
+        ).run(randomUUID(), userId, s.id, s.name, s.api, m.m + 1, now())
+      }
+    },
+    remove: (id: string): boolean =>
+      db.prepare('DELETE FROM user_sources WHERE user_id = ? AND source_id = ?').run(userId, id)
+        .changes > 0,
+  }
+}
+
+const toVod = (s: UserSource): VodSource => ({ ...s, timeoutMs: 15000 })
 
 async function fetchJson(source: VodSource, params: Record<string, string>): Promise<any> {
   const u = new URL(source.api)
@@ -40,7 +133,7 @@ export interface VideoItem {
   type: string
 }
 
-function normVideo(s: VodSource, v: any): VideoItem {
+function normVideo(s: { id: string; name: string }, v: any): VideoItem {
   return {
     source: s.id,
     sourceName: s.name,
@@ -53,8 +146,87 @@ function normVideo(s: VodSource, v: any): VideoItem {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 账号
+// ---------------------------------------------------------------------------
+app.post('/api/auth/register', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  try {
+    const u = createUser(String(body.username ?? ''), String(body.password ?? ''))
+    return c.json({ token: createToken(u.id), username: u.username })
+  } catch (e: any) {
+    return c.json({ error: e.message ?? 'register failed' }, 400)
+  }
+})
+
+app.post('/api/auth/login', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  try {
+    const u = verifyUser(String(body.username ?? ''), String(body.password ?? ''))
+    return c.json({ token: createToken(u.id), username: u.username })
+  } catch (e: any) {
+    return c.json({ error: e.message ?? 'login failed' }, 400)
+  }
+})
+
+app.post('/api/auth/logout', authRequired, async (c) => {
+  const m = (c.req.header('authorization') ?? '').match(/^Bearer (.+)$/)
+  if (m) revokeToken(m[1])
+  return c.json({ ok: true })
+})
+
+app.get('/api/auth/me', authRequired, (c) => c.json({ username: c.get('username') }))
+
+// ---------------------------------------------------------------------------
+// 同步: 历史 + 设置 (last-write-wins)。源列表存在服务端账号下, 天然一致, 不走同步。
+// ---------------------------------------------------------------------------
+app.get('/api/sync/pull', authRequired, (c) => {
+  const userId = userIdOf(c)!
+  const since = Number(c.req.query('since') ?? 0)
+  const history = db
+    .prepare(
+      'SELECT source, video_id, data, updated_at FROM user_history WHERE user_id = ? AND updated_at > ? ORDER BY updated_at',
+    )
+    .all(userId, since)
+  const settings = db
+    .prepare('SELECT data, updated_at FROM user_settings WHERE user_id = ?')
+    .get(userId) as any
+  return c.json({
+    history,
+    settings: settings && settings.updated_at > since ? settings : null,
+    serverTime: Date.now(),
+  })
+})
+
+app.post('/api/sync/push', authRequired, async (c) => {
+  const userId = userIdOf(c)!
+  const body = await c.req.json().catch(() => ({}))
+  const upHistory = db.prepare(`
+    INSERT INTO user_history(user_id, source, video_id, data, updated_at) VALUES(?,?,?,?,?)
+    ON CONFLICT(user_id, source, video_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
+    WHERE excluded.updated_at > user_history.updated_at`)
+  const upSettings = db.prepare(`
+    INSERT INTO user_settings(user_id, data, updated_at) VALUES(?,?,?)
+    ON CONFLICT(user_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
+    WHERE excluded.updated_at > user_settings.updated_at`)
+  db.transaction(() => {
+    for (const h of body.history ?? []) {
+      if (!h.source || !h.video_id || !h.updated_at) continue
+      upHistory.run(userId, String(h.source), String(h.video_id), String(h.data ?? '{}'), Number(h.updated_at))
+    }
+    const s = body.settings
+    if (s && s.updated_at) {
+      upSettings.run(userId, String(s.data ?? '{}'), Number(s.updated_at))
+    }
+  })()
+  return c.json({ serverTime: Date.now() })
+})
+
+// ---------------------------------------------------------------------------
+// 源管理
+// ---------------------------------------------------------------------------
 /** 源列表 (含接口地址, 供管理页用) */
-app.get('/api/sources', (c) => c.json(store.all()))
+app.get('/api/sources', (c) => c.json(sourceOps(userIdOf(c)).list()))
 
 function slugify(name: string): string {
   const s = name
@@ -73,45 +245,48 @@ function validApiUrl(api: string): URL | null {
   }
 }
 
+const randSuffix = () => Math.random().toString(36).slice(2, 6)
+
 /** 添加源 */
-app.post('/api/sources', admin, async (c) => {
+app.post('/api/sources', sourceWrite, async (c) => {
+  const ops = sourceOps(userIdOf(c))
   const body = await c.req.json().catch(() => ({}))
   const name = String(body.name ?? '').trim()
   const url = validApiUrl(String(body.api ?? '').trim())
   if (!name) return c.json({ error: 'name required' }, 400)
   if (!url) return c.json({ error: 'invalid api url' }, 400)
   let id = String(body.id ?? '').trim() || slugify(name)
-  if (store.get(id)) id = `${id}-${Math.random().toString(36).slice(2, 6)}`
-  const src: VodSource = { id, name, api: url.toString(), timeoutMs: 15000 }
-  store.upsert(src)
-  return c.json({ id: src.id, name: src.name }, 201)
+  if (ops.get(id)) id = `${id}-${randSuffix()}`
+  ops.upsert({ id, name, api: url.toString() })
+  return c.json({ id, name }, 201)
 })
 
 /** 修改源 */
-app.put('/api/sources/:id', admin, async (c) => {
-  const cur = store.get(c.req.param('id') ?? '')
+app.put('/api/sources/:id', sourceWrite, async (c) => {
+  const ops = sourceOps(userIdOf(c))
+  const cur = ops.get(c.req.param('id') ?? '')
   if (!cur) return c.json({ error: 'not found' }, 404)
   const body = await c.req.json().catch(() => ({}))
   const name = String(body.name ?? cur.name).trim()
   const url = validApiUrl(String(body.api ?? cur.api).trim())
   if (!name) return c.json({ error: 'name required' }, 400)
   if (!url) return c.json({ error: 'invalid api url' }, 400)
-  const src: VodSource = { ...cur, name, api: url.toString() }
-  store.upsert(src)
-  typeCache.delete(cur.id)
-  return c.json({ id: src.id, name: src.name })
+  ops.upsert({ id: cur.id, name, api: url.toString() })
+  typeCache.delete(cacheKey(c, cur.id))
+  return c.json({ id: cur.id, name })
 })
 
 /** 删除源 */
-app.delete('/api/sources/:id', admin, async (c) => {
+app.delete('/api/sources/:id', sourceWrite, async (c) => {
+  const ops = sourceOps(userIdOf(c))
   const id = c.req.param('id') ?? ''
-  if (!store.remove(id)) return c.json({ error: 'not found' }, 404)
-  typeCache.delete(id)
+  if (!ops.remove(id)) return c.json({ error: 'not found' }, 404)
+  typeCache.delete(cacheKey(c, id))
   return c.json({ ok: true })
 })
 
 /** 测试源连通性: 尝试拉取分类, 返回分类数量 */
-app.post('/api/sources/test', admin, async (c) => {
+app.post('/api/sources/test', sourceWrite, async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const url = validApiUrl(String(body.api ?? '').trim())
   if (!url) return c.json({ ok: false, error: '接口地址无效' })
@@ -126,26 +301,67 @@ app.post('/api/sources/test', admin, async (c) => {
   }
 })
 
-/** 每个源的分类 (缓存 1 小时) */
+/**
+ * 从 URL 批量导入源列表。
+ * 接受 JSON 数组 [{name, api}] 或 {sources:[...]} / {list:[...]}。
+ */
+app.post('/api/sources/import-url', sourceWrite, async (c) => {
+  const ops = sourceOps(userIdOf(c))
+  const body = await c.req.json().catch(() => ({}))
+  const url = validApiUrl(String(body.url ?? '').trim())
+  if (!url) return c.json({ error: 'invalid url' }, 400)
+  try {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), 15000)
+    const r = await fetch(url, { signal: ctrl.signal, headers: { 'User-Agent': 'LiuYing/0.1' } })
+    clearTimeout(t)
+    if (!r.ok) throw new Error(`http ${r.status}`)
+    const j = await r.json()
+    const arr: any[] = Array.isArray(j) ? j : (j.sources ?? j.list ?? [])
+    let added = 0
+    for (const it of arr) {
+      const name = String(it?.name ?? '').trim()
+      const api = validApiUrl(String(it?.api ?? it?.url ?? '').trim())
+      if (!name || !api) continue
+      let sid = slugify(name)
+      if (ops.get(sid)) sid = `${sid}-${randSuffix()}`
+      ops.upsert({ id: sid, name, api: api.toString() })
+      added++
+    }
+    return c.json({ added })
+  } catch (e: any) {
+    return c.json({ error: String(e?.message ?? e) }, 400)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 内容接口 (分类/列表/搜索/详情), 按登录状态读对应源列表
+// ---------------------------------------------------------------------------
 const typeCache = new Map<string, { at: number; data: { id: string; name: string }[] }>()
+const cacheKey = (c: Context, id: string) => `${userIdOf(c) ?? 'global'}:${id}`
+
+/** 每个源的分类 (缓存 1 小时) */
 app.get('/api/types', async (c) => {
-  const s = store.get(c.req.query('source') ?? '')
+  const ops = sourceOps(userIdOf(c))
+  const s = ops.get(c.req.query('source') ?? '')
   if (!s) return c.json({ error: 'unknown source' }, 400)
-  const hit = typeCache.get(s.id)
+  const key = cacheKey(c, s.id)
+  const hit = typeCache.get(key)
   if (hit && Date.now() - hit.at < 3600_000) return c.json(hit.data)
-  const data = await fetchJson(s, { ac: 'list' })
+  const data = await fetchJson(toVod(s), { ac: 'list' })
   const list = (data.class ?? []).map((t: any) => ({ id: String(t.type_id), name: t.type_name }))
-  typeCache.set(s.id, { at: Date.now(), data: list })
+  typeCache.set(key, { at: Date.now(), data: list })
   return c.json(list)
 })
 
 /** 按分类取影片列表 */
 app.get('/api/list', async (c) => {
-  const s = store.get(c.req.query('source') ?? '')
+  const ops = sourceOps(userIdOf(c))
+  const s = ops.get(c.req.query('source') ?? '')
   if (!s) return c.json({ error: 'unknown source' }, 400)
   const t = c.req.query('t') ?? ''
   const pg = c.req.query('pg') ?? '1'
-  const data = await fetchJson(s, { ac: 'videolist', t, pg })
+  const data = await fetchJson(toVod(s), { ac: 'videolist', t, pg })
   return c.json({
     page: Number(data.page ?? pg),
     pagecount: Number(data.pagecount ?? 1),
@@ -156,15 +372,16 @@ app.get('/api/list', async (c) => {
 
 /** 聚合搜索: 不传 sources = 搜全部源, 传 sources=a,b = 只搜指定源 */
 app.get('/api/search', async (c) => {
+  const ops = sourceOps(userIdOf(c))
   const wd = (c.req.query('wd') ?? '').trim()
   if (!wd) return c.json([])
   const ids = (c.req.query('sources') ?? '').split(',').map((x) => x.trim()).filter(Boolean)
-  const targets = (ids.length ? ids.map((id) => store.get(id)) : store.all()).filter(
-    (s): s is VodSource => !!s,
+  const targets = (ids.length ? ids.map((id) => ops.get(id)) : ops.list()).filter(
+    (s): s is UserSource => !!s,
   )
   const settled = await Promise.allSettled(
     targets.map(async (s) => {
-      const data = await fetchJson(s, { ac: 'videolist', wd, pg: '1' })
+      const data = await fetchJson(toVod(s), { ac: 'videolist', wd, pg: '1' })
       return (data.list ?? []).map((v: any) => normVideo(s, v))
     }),
   )
@@ -175,10 +392,11 @@ app.get('/api/search', async (c) => {
 
 /** 详情 + 播放地址解析 (vod_play_url 按 $$$ 分线路, # 分集, $ 分隔集名和地址) */
 app.get('/api/detail', async (c) => {
-  const s = store.get(c.req.query('source') ?? '')
+  const ops = sourceOps(userIdOf(c))
+  const s = ops.get(c.req.query('source') ?? '')
   const ids = c.req.query('ids') ?? ''
   if (!s || !ids) return c.json({ error: 'bad request' }, 400)
-  const data = await fetchJson(s, { ac: 'videolist', ids })
+  const data = await fetchJson(toVod(s), { ac: 'videolist', ids })
   const v = (data.list ?? [])[0]
   if (!v) return c.json({ error: 'not found' }, 404)
   const groups = String(v.vod_play_url ?? '').split('$$$')
@@ -227,7 +445,8 @@ app.get('/api/proxy', async (c) => {
       .map((line) => {
         const t = line.trim()
         if (!t) return line
-        if (t.startsWith('#')) return line.replace(/URI="([^"]+)"/g, (_, u) => `URI="${proxied(abs(u))}"`)
+        if (t.startsWith('#'))
+          return line.replace(/URI="([^"]+)"/g, (_, u) => `URI="${proxied(abs(u))}"`)
         return proxied(abs(t))
       })
       .join('\n')
@@ -237,8 +456,14 @@ app.get('/api/proxy', async (c) => {
   return new Response(upstream.body, { status: upstream.status, headers })
 })
 
-app.get('/api/health', (c) => c.json({ ok: true, sources: store.all().length }))
+app.get('/api/health', (c) =>
+  c.json({
+    ok: true,
+    user: c.get('username') ?? null,
+    sources: sourceOps(userIdOf(c)).list().length,
+  }),
+)
 
 const port = Number(process.env.PORT ?? 3000)
-console.log(`[liuying] api listening on :${port}, ${store.all().length} sources`)
+console.log(`[liuying] api listening on :${port}`)
 serve({ fetch: app.fetch, port })

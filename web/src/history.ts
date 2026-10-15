@@ -50,6 +50,24 @@ export function removeHistory(source: string, id: string): void {
   }
 }
 
+/**
+ * 合并一条历史记录 (同步用): 保留 updatedAt, 只有更新的才覆盖。
+ * 返回 true 表示本地发生了变化。
+ */
+export function mergeHistoryItem(item: HistoryItem): boolean {
+  const list = getHistory()
+  const i = list.findIndex((h) => h.source === item.source && h.id === item.id)
+  if (i >= 0 && list[i].updatedAt >= item.updatedAt) return false
+  const next = list.filter((h) => !(h.source === item.source && h.id === item.id))
+  next.unshift(item)
+  try {
+    localStorage.setItem(KEY, JSON.stringify(next.slice(0, MAX)))
+  } catch {
+    /* ignore */
+  }
+  return true
+}
+
 export function clearHistory(): void {
   try {
     localStorage.removeItem(KEY)
