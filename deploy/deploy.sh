@@ -2,21 +2,23 @@
 #
 # 流影一键部署脚本
 #
-# 用法:
-#   sudo ./deploy.sh --dir /srv/liuying [--web-dist ./web-dist] [--api-dist ./api-dist]
-#                    [--user liuying] [--port 3000]
+# 两种用法:
+#   1) 自动下载 (推荐): sudo ./deploy.sh --dir /srv/liuying --download
+#      从 GitHub Release (默认 fansa91/liuying 的 latest) 下载部署包
+#   2) 本地包: sudo ./deploy.sh --dir /srv/liuying \
+#                --web-dist ./web-dist --api-dist ./api-dist
 #
-# 说明:
-#   - --dir      安装目录 (默认 /srv/liuying), 下面会生成 web/ 和 api/
-#   - --web-dist 前端 dist 目录 (默认 <repo>/web/dist)
-#   - --api-dist 后端目录, 里面需有 dist/ + package.json (默认 <repo>/api)
-#   - Caddy 请手动配置, 参考 deploy/Caddyfile (注意把 /api 反代到 --port)
+# 可选: --repo owner/name --tag latest --user liuying --port 3000
+# Caddy 请手动配置, 参考 deploy/Caddyfile (注意把 /api 反代到 --port)
 #
 set -euo pipefail
 
 DIR="/srv/liuying"
 WEB_DIST=""
 API_DIST=""
+DOWNLOAD=0
+REPO="fansa91/liuying"
+TAG="latest"
 USER="liuying"
 PORT="3000"
 
@@ -25,14 +27,20 @@ usage() {
 流影一键部署脚本
 
 用法:
-  sudo ./deploy.sh --dir /srv/liuying [--web-dist ./web-dist] [--api-dist ./api-dist]
-                   [--user liuying] [--port 3000]
+  sudo ./deploy.sh --dir /srv/liuying --download [--repo owner/name] [--tag latest]
+  sudo ./deploy.sh --dir /srv/liuying --web-dist ./web-dist --api-dist ./api-dist
 
-说明:
-  - --dir      安装目录 (默认 /srv/liuying), 下面会生成 web/ 和 api/
-  - --web-dist 前端 dist 目录 (默认 <repo>/web/dist)
-  - --api-dist 后端目录, 里面需有 dist/ + package.json (默认 <repo>/api)
-  - Caddy 请手动配置, 参考 deploy/Caddyfile (注意把 /api 反代到 --port)
+选项:
+  --dir       安装目录 (默认 /srv/liuying), 下面会生成 web/ 和 api/
+  --download  从 GitHub Release 自动下载部署包 (与 --web-dist/--api-dist 互斥)
+  --repo      仓库 (默认 fansa91/liuying, 仅 --download 用)
+  --tag       Release 标签 (默认 latest, 仅 --download 用)
+  --web-dist  前端 dist 目录 (默认 <repo>/web/dist)
+  --api-dist  后端目录, 里面需有 dist/ + package.json (默认 <repo>/api)
+  --user      运行用户 (默认 liuying, 不存在会自动创建)
+  --port      后端端口 (默认 3000)
+
+Caddy 请手动配置, 参考 deploy/Caddyfile (注意把 /api 反代到 --port)
 EOF
 }
 
@@ -41,6 +49,9 @@ while [[ $# -gt 0 ]]; do
     --dir)      DIR="$2";      shift 2 ;;
     --web-dist) WEB_DIST="$2"; shift 2 ;;
     --api-dist) API_DIST="$2"; shift 2 ;;
+    --download) DOWNLOAD=1;    shift ;;
+    --repo)     REPO="$2";     shift 2 ;;
+    --tag)      TAG="$2";      shift 2 ;;
     --user)     USER="$2";     shift 2 ;;
     --port)     PORT="$2";     shift 2 ;;
     -h|--help)  usage; exit 0 ;;
@@ -50,13 +61,48 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+SERVICE_TEMPLATE="$SCRIPT_DIR/liuying-api.service"
+SOURCES_EXAMPLE="$REPO_ROOT/api/sources.json.example"
+
+dl() { # dl <url> <dest>
+  echo "下载 $1"
+  curl -sSL --fail --retry 3 -o "$2" "$1"
+  [[ -s "$2" ]] || { echo "下载失败或文件为空: $1"; exit 1; }
+}
+
+WORK=""
+cleanup() { [[ -n "$WORK" && -d "$WORK" ]] && rm -rf "$WORK"; }
+trap cleanup EXIT
+
+if [[ "$DOWNLOAD" -eq 1 ]]; then
+  command -v curl >/dev/null || { echo "需要先安装 curl"; exit 1; }
+  command -v tar >/dev/null || { echo "需要先安装 tar"; exit 1; }
+  if [[ -n "$WEB_DIST" || -n "$API_DIST" ]]; then
+    echo "--download 不能与 --web-dist/--api-dist 同时使用"; exit 1
+  fi
+  WORK="$(mktemp -d)"
+  BASE="https://github.com/${REPO}/releases/download/${TAG}"
+  mkdir -p "$WORK/web-dist" "$WORK/api-dist"
+  dl "$BASE/liuying-web-dist.tar.gz" "$WORK/web-dist.tar.gz"
+  dl "$BASE/liuying-api-dist.tar.gz"  "$WORK/api-dist.tar.gz"
+  dl "$BASE/liuying-api.service"      "$WORK/liuying-api.service"
+  dl "$BASE/sources.json.example"     "$WORK/sources.json.example"
+  tar -xzf "$WORK/web-dist.tar.gz" -C "$WORK/web-dist"
+  tar -xzf "$WORK/api-dist.tar.gz"  -C "$WORK/api-dist"
+  WEB_DIST="$WORK/web-dist"
+  API_DIST="$WORK/api-dist"
+  SERVICE_TEMPLATE="$WORK/liuying-api.service"
+  SOURCES_EXAMPLE="$WORK/sources.json.example"
+fi
+
 [[ -z "$WEB_DIST" ]] && WEB_DIST="$REPO_ROOT/web/dist"
 [[ -z "$API_DIST" ]] && API_DIST="$REPO_ROOT/api"
 
 [[ "$EUID" -eq 0 ]] || { echo "请用 root 运行 (需要写 /etc/systemd)"; exit 1; }
 [[ -n "$DIR" && "$DIR" != "/" ]] || { echo "--dir 非法"; exit 1; }
 [[ -d "$WEB_DIST" ]] || { echo "找不到前端 dist: $WEB_DIST"; exit 1; }
-[[ -d "$API_DIST/dist" ]] || { echo "找不到后端构建产物: $API_DIST/dist (先在 api/ 里 npm run build)"; exit 1; }
+[[ -d "$API_DIST/dist" ]] || { echo "找不到后端构建产物: $API_DIST/dist"; exit 1; }
+[[ -f "$SERVICE_TEMPLATE" ]] || { echo "找不到 systemd 模板: $SERVICE_TEMPLATE"; exit 1; }
 command -v node >/dev/null || { echo "服务器需要先安装 node"; exit 1; }
 
 echo "==> 部署到 $DIR"
@@ -80,15 +126,19 @@ cp -r "$API_DIST/dist" "$DIR/api/dist"
 cp "$API_DIST/package.json" "$API_DIST/package-lock.json" "$DIR/api/"
 (cd "$DIR/api" && npm ci --omit=dev --no-audit --no-fund >/dev/null)
 if [[ ! -f "$DIR/api/sources.json" ]]; then
-  cp "$REPO_ROOT/api/sources.json.example" "$DIR/api/sources.json"
-  echo "已生成 $DIR/api/sources.json, 请填入你的源地址"
+  if [[ -f "$SOURCES_EXAMPLE" ]]; then
+    cp "$SOURCES_EXAMPLE" "$DIR/api/sources.json"
+  else
+    echo "[]" > "$DIR/api/sources.json"
+  fi
+  echo "已生成 $DIR/api/sources.json, 请填入你的源后 restart 服务"
 fi
 chown -R "$USER:$USER" "$DIR"
 echo "后端 -> $DIR/api (端口 $PORT)"
 
 # systemd
 sed -e "s|@DIR@|$DIR|g" -e "s|@USER@|$USER|g" -e "s|@PORT@|$PORT|g" \
-  "$SCRIPT_DIR/liuying-api.service" > /etc/systemd/system/liuying-api.service
+  "$SERVICE_TEMPLATE" > /etc/systemd/system/liuying-api.service
 systemctl daemon-reload
 systemctl enable liuying-api.service >/dev/null
 systemctl restart liuying-api.service

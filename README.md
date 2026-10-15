@@ -47,31 +47,19 @@ cd web && npm install && npm run dev
 ## 部署
 
 每次 push 到 main 会自动构建, 并把部署包发布到
-[Release (tag: latest)](https://github.com/fansa91/liuying/releases/tag/latest),
-包含: `liuying-web-dist.tar.gz`、`liuying-api-dist.tar.gz`、`deploy.sh`、
-`liuying-api.service`、`Caddyfile`、`sources.json.example`。
+[Release (tag: latest)](https://github.com/fansa91/liuying/releases/tag/latest)。
 
 ```bash
-# 在服务器上: 一次下载齐
-mkdir -p ~/release/{web-dist,api-dist,deploy,api} && cd ~/release
-base=https://github.com/fansa91/liuying/releases/download/latest
-curl -sL -o web-dist.tar.gz $base/liuying-web-dist.tar.gz
-curl -sL -o api-dist.tar.gz  $base/liuying-api-dist.tar.gz
-curl -sL -o deploy/deploy.sh $base/deploy.sh
-curl -sL -o deploy/liuying-api.service $base/liuying-api.service
-curl -sL -o deploy/Caddyfile $base/Caddyfile
-curl -sL -o api/sources.json.example $base/sources.json.example
-tar -xzf web-dist.tar.gz -C web-dist
-tar -xzf api-dist.tar.gz -C api-dist
-chmod +x deploy/deploy.sh
-
-# 一键部署 (Caddy 手动配置, 参考 deploy/Caddyfile)
-sudo ./deploy/deploy.sh --dir /srv/liuying \
-  --web-dist ~/release/web-dist \
-  --api-dist ~/release/api-dist
+# 在服务器上: 下载部署脚本, 一键部署 (包会自动从 Release 下载)
+curl -sSL -o deploy.sh https://github.com/fansa91/liuying/releases/download/latest/deploy.sh
+chmod +x deploy.sh
+sudo ./deploy.sh --dir /srv/liuying --download
 # 填源: 编辑 /srv/liuying/api/sources.json, 然后
 sudo systemctl restart liuying-api
 ```
+
+也可以用本地包: `sudo ./deploy.sh --dir /srv/liuying --web-dist ./web-dist --api-dist ./api-dist`,
+或指定仓库/标签: `--repo owner/name --tag v1.0.0`。Caddy 手动配置, 参考 `deploy/Caddyfile`。
 
 脚本会: 拷贝前端到 `<dir>/web`, 后端到 `<dir>/api` 并 `npm ci --omit=dev`,
 首次生成 `sources.json` (不覆盖已有), 按 `--dir/--user/--port` 生成 systemd
