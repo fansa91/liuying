@@ -97,13 +97,18 @@ cd web && npm install && npm run dev
 # 在服务器上: 下载部署脚本, 一键部署 (包会自动从 Release 下载)
 curl -sSL -o deploy.sh https://github.com/fansa91/liuying/releases/download/latest/deploy.sh
 chmod +x deploy.sh
-sudo ./deploy.sh --dir /srv/liuying --download
+sudo ./deploy.sh --dir /srv/liuying --download \
+  --db-host 127.0.0.1 --db-port 3306 --db-user liuying --db-pass yourpassword --db-name liuying \
+  --admin-token xxx
 # 填源: 编辑 /srv/liuying/api/sources.json, 然后
 sudo systemctl restart liuying-api
 ```
 
 也可以用本地包: `sudo ./deploy.sh --dir /srv/liuying --web-dist ./web-dist --api-dist ./api-dist`,
 或指定仓库/标签: `--repo owner/name --tag v1.0.0`。Caddy 手动配置, 参考 `deploy/Caddyfile`。
+
+说明: `--db-*` / `--admin-token` 会写入 `<dir>/api/.env` (权限 600),
+只更新你指定的项, 之前手工改过的内容会保留; 不传这些参数就保持 `.env` 不动。
 
 脚本会: 拷贝前端到 `<dir>/web`, 后端到 `<dir>/api` 并 `npm ci --omit=dev`,
 首次生成 `sources.json` (不覆盖已有), 按 `--dir/--user/--port` 生成 systemd

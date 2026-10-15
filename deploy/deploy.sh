@@ -9,6 +9,8 @@
 #                --web-dist ./web-dist --api-dist ./api-dist
 #
 # 可选: --repo owner/name --tag latest --user root --port 3000 --node /usr/bin/node
+#       --db-host 127.0.0.1 --db-port 3306 --db-user root --db-pass xxx --db-name liuying
+#       --admin-token xxx
 # Caddy 请手动配置, 参考 deploy/Caddyfile (注意把 /api 反代到 --port)
 #
 set -euo pipefail
@@ -22,6 +24,12 @@ TAG="latest"
 USER="root"
 PORT="3000"
 NODE_BIN=""
+DB_HOST=""
+DB_PORT=""
+DB_USER=""
+DB_PASS=""
+DB_NAME=""
+ADMIN_TOKEN_ARG=""
 
 usage() {
   cat <<'EOF'
@@ -41,6 +49,14 @@ usage() {
   --user      运行用户 (默认 root, 不存在会自动创建)
   --port      后端端口 (默认 3000)
   --node      node 可执行文件路径 (默认自动探测 command -v node)
+  --db-host   MySQL 地址 (默认 127.0.0.1)
+  --db-port   MySQL 端口 (默认 3306)
+  --db-user   MySQL 用户名 (默认 root)
+  --db-pass   MySQL 密码
+  --db-name   MySQL 库名 (默认 liuying, 不存在自动创建)
+  --admin-token  管理密钥 (匿名写接口鉴权用)
+
+数据库/密钥信息写入 <dir>/api/.env, 只更新指定的项, 已有手工配置保留。
 
 Caddy 请手动配置, 参考 deploy/Caddyfile (注意把 /api 反代到 --port)
 EOF
@@ -57,6 +73,12 @@ while [[ $# -gt 0 ]]; do
     --user)     USER="$2";     shift 2 ;;
     --port)     PORT="$2";     shift 2 ;;
     --node)     NODE_BIN="$2"; shift 2 ;;
+    --db-host)  DB_HOST="$2";  shift 2 ;;
+    --db-port)  DB_PORT="$2";  shift 2 ;;
+    --db-user)  DB_USER="$2";  shift 2 ;;
+    --db-pass)  DB_PASS="$2";  shift 2 ;;
+    --db-name)  DB_NAME="$2";  shift 2 ;;
+    --admin-token) ADMIN_TOKEN_ARG="$2"; shift 2 ;;
     -h|--help)  usage; exit 0 ;;
     *) echo "未知参数: $1"; usage; exit 1 ;;
   esac
@@ -141,6 +163,30 @@ if [[ ! -f "$DIR/api/sources.json" ]]; then
     echo "[]" > "$DIR/api/sources.json"
   fi
   echo "已生成 $DIR/api/sources.json, 请填入你的源后 restart 服务"
+fi
+
+# 数据库/密钥信息写入 .env, 只更新指定的项, 已有手工配置保留
+ENV_FILE="$DIR/api/.env"
+esc_sed() { printf '%s' "$1" | sed -e 's/[\\/&|]/\\&/g'; }
+set_env() {
+  local key="$1" value="$2"
+  [[ -n "$value" ]] || return 0
+  touch "$ENV_FILE"
+  if grep -q "^${key}=" "$ENV_FILE"; then
+    sed -i "s|^${key}=.*|${key}=$(esc_sed "$value")|" "$ENV_FILE"
+  else
+    echo "${key}=${value}" >> "$ENV_FILE"
+  fi
+}
+if [[ -n "$DB_HOST$DB_PORT$DB_USER$DB_PASS$DB_NAME$ADMIN_TOKEN_ARG" ]]; then
+  set_env DB_HOST "$DB_HOST"
+  set_env DB_PORT "$DB_PORT"
+  set_env DB_USER "$DB_USER"
+  set_env DB_PASSWORD "$DB_PASS"
+  set_env DB_NAME "$DB_NAME"
+  set_env ADMIN_TOKEN "$ADMIN_TOKEN_ARG"
+  chmod 600 "$ENV_FILE"
+  echo "已更新 $ENV_FILE"
 fi
 if [[ "$USER" != "root" ]]; then
   chown -R "$USER:$USER" "$DIR"
