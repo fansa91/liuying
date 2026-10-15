@@ -31,7 +31,7 @@ export interface VideoDetail extends VideoItem {
 }
 
 async function get<T>(path: string): Promise<T> {
-  const r = await fetch(`/api${path}`)
+  const r = await fetch(`/api${path}`, { headers: authHeaders() })
   if (!r.ok) throw new Error(`请求失败: ${r.status}`)
   return r.json()
 }
