@@ -3,8 +3,18 @@ import { serve } from '@hono/node-server'
 import { Hono, type Context, type Next } from 'hono'
 import { cors } from 'hono/cors'
 import { createToken, createUser, getUserByToken, revokeToken, verifyUser } from './auth.js'
-import { db } from './db.js'
+import { initDb, pool } from './db.js'
 import { store, type VodSource } from './sources.js'
+
+try {
+  await initDb()
+} catch (e: any) {
+  console.error(
+    `[liuying] MySQL 连接失败 (${process.env.DB_HOST ?? '127.0.0.1'}:${process.env.DB_PORT ?? 3306}): ${e.message}`,
+  )
+  console.error('[liuying] 请检查 MySQL 是否运行, 以及 DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME 环境变量')
+  process.exit(1)
+}
 
 const app = new Hono<{ Variables: { userId?: string; username?: string } }>()
 app.use('/api/*', cors())
@@ -22,7 +32,7 @@ async function admin(c: Context, next: Next) {
 async function authOptional(c: Context, next: Next) {
   const m = (c.req.header('authorization') ?? '').match(/^Bearer (.+)$/)
   if (m) {
-    const u = getUserByToken(m[1])
+    const u = await getUserByToken(m[1])
     if (u) {
       c.set('userId', u.id)
       c.set('username', u.username)
@@ -60,49 +70,58 @@ interface UserSource {
 function sourceOps(userId?: string) {
   if (!userId) {
     return {
-      list: (): UserSource[] => store.all(),
-      get: (id: string): UserSource | undefined => store.get(id),
-      upsert: (s: UserSource) => store.upsert({ ...s, timeoutMs: 15000 }),
-      remove: (id: string): boolean => store.remove(id),
+      list: async (): Promise<UserSource[]> => store.all(),
+      get: async (id: string): Promise<UserSource | undefined> => store.get(id),
+      upsert: async (s: UserSource): Promise<void> => {
+        store.upsert({ ...s, timeoutMs: 15000 })
+      },
+      remove: async (id: string): Promise<boolean> => store.remove(id),
     }
   }
-  const now = () => Date.now()
   return {
-    list: (): UserSource[] =>
-      db
-        .prepare(
-          'SELECT source_id AS id, name, api FROM user_sources WHERE user_id = ? ORDER BY sort, rowid',
-        )
-        .all(userId) as UserSource[],
-    get: (id: string): UserSource | undefined =>
-      db
-        .prepare(
-          'SELECT source_id AS id, name, api FROM user_sources WHERE user_id = ? AND source_id = ?',
-        )
-        .get(userId, id) as UserSource | undefined,
-    upsert: (s: UserSource) => {
-      const row = db
-        .prepare('SELECT id FROM user_sources WHERE user_id = ? AND source_id = ?')
-        .get(userId, s.id) as any
-      if (row) {
-        db.prepare('UPDATE user_sources SET name = ?, api = ?, updated_at = ? WHERE id = ?').run(
-          s.name,
-          s.api,
-          now(),
-          row.id,
+    list: async (): Promise<UserSource[]> => {
+      const [rows] = await pool.execute(
+        'SELECT source_id AS id, name, api FROM user_sources WHERE user_id = ? ORDER BY sort, id',
+        [userId],
+      )
+      return rows as UserSource[]
+    },
+    get: async (id: string): Promise<UserSource | undefined> => {
+      const [rows] = await pool.execute(
+        'SELECT source_id AS id, name, api FROM user_sources WHERE user_id = ? AND source_id = ?',
+        [userId, id],
+      )
+      return (rows as UserSource[])[0]
+    },
+    upsert: async (s: UserSource): Promise<void> => {
+      const [rows] = await pool.execute(
+        'SELECT id FROM user_sources WHERE user_id = ? AND source_id = ?',
+        [userId, s.id],
+      )
+      const now = Date.now()
+      if ((rows as any[]).length) {
+        await pool.execute(
+          'UPDATE user_sources SET name = ?, api = ?, updated_at = ? WHERE user_id = ? AND source_id = ?',
+          [s.name, s.api, now, userId, s.id],
         )
       } else {
-        const m = db
-          .prepare('SELECT COALESCE(MAX(sort), -1) AS m FROM user_sources WHERE user_id = ?')
-          .get(userId) as any
-        db.prepare(
+        const [m] = await pool.execute(
+          'SELECT COALESCE(MAX(sort), -1) AS m FROM user_sources WHERE user_id = ?',
+          [userId],
+        )
+        await pool.execute(
           'INSERT INTO user_sources(id, user_id, source_id, name, api, sort, updated_at) VALUES(?,?,?,?,?,?,?)',
-        ).run(randomUUID(), userId, s.id, s.name, s.api, m.m + 1, now())
+          [randomUUID(), userId, s.id, s.name, s.api, (m as any[])[0].m + 1, now],
+        )
       }
     },
-    remove: (id: string): boolean =>
-      db.prepare('DELETE FROM user_sources WHERE user_id = ? AND source_id = ?').run(userId, id)
-        .changes > 0,
+    remove: async (id: string): Promise<boolean> => {
+      const [r] = await pool.execute('DELETE FROM user_sources WHERE user_id = ? AND source_id = ?', [
+        userId,
+        id,
+      ])
+      return (r as any).affectedRows > 0
+    },
   }
 }
 
@@ -152,8 +171,8 @@ function normVideo(s: { id: string; name: string }, v: any): VideoItem {
 app.post('/api/auth/register', async (c) => {
   const body = await c.req.json().catch(() => ({}))
   try {
-    const u = createUser(String(body.username ?? ''), String(body.password ?? ''))
-    return c.json({ token: createToken(u.id), username: u.username })
+    const u = await createUser(String(body.username ?? ''), String(body.password ?? ''))
+    return c.json({ token: await createToken(u.id), username: u.username })
   } catch (e: any) {
     return c.json({ error: e.message ?? 'register failed' }, 400)
   }
@@ -162,8 +181,8 @@ app.post('/api/auth/register', async (c) => {
 app.post('/api/auth/login', async (c) => {
   const body = await c.req.json().catch(() => ({}))
   try {
-    const u = verifyUser(String(body.username ?? ''), String(body.password ?? ''))
-    return c.json({ token: createToken(u.id), username: u.username })
+    const u = await verifyUser(String(body.username ?? ''), String(body.password ?? ''))
+    return c.json({ token: await createToken(u.id), username: u.username })
   } catch (e: any) {
     return c.json({ error: e.message ?? 'login failed' }, 400)
   }
@@ -171,7 +190,7 @@ app.post('/api/auth/login', async (c) => {
 
 app.post('/api/auth/logout', authRequired, async (c) => {
   const m = (c.req.header('authorization') ?? '').match(/^Bearer (.+)$/)
-  if (m) revokeToken(m[1])
+  if (m) await revokeToken(m[1])
   return c.json({ ok: true })
 })
 
@@ -180,17 +199,17 @@ app.get('/api/auth/me', authRequired, (c) => c.json({ username: c.get('username'
 // ---------------------------------------------------------------------------
 // 同步: 历史 + 设置 (last-write-wins)。源列表存在服务端账号下, 天然一致, 不走同步。
 // ---------------------------------------------------------------------------
-app.get('/api/sync/pull', authRequired, (c) => {
+app.get('/api/sync/pull', authRequired, async (c) => {
   const userId = userIdOf(c)!
   const since = Number(c.req.query('since') ?? 0)
-  const history = db
-    .prepare(
-      'SELECT source, video_id, data, updated_at FROM user_history WHERE user_id = ? AND updated_at > ? ORDER BY updated_at',
-    )
-    .all(userId, since)
-  const settings = db
-    .prepare('SELECT data, updated_at FROM user_settings WHERE user_id = ?')
-    .get(userId) as any
+  const [history] = await pool.execute(
+    'SELECT source, video_id, data, updated_at FROM user_history WHERE user_id = ? AND updated_at > ? ORDER BY updated_at',
+    [userId, since],
+  )
+  const [srows] = await pool.execute('SELECT data, updated_at FROM user_settings WHERE user_id = ?', [
+    userId,
+  ])
+  const settings = (srows as any[])[0]
   return c.json({
     history,
     settings: settings && settings.updated_at > since ? settings : null,
@@ -201,24 +220,49 @@ app.get('/api/sync/pull', authRequired, (c) => {
 app.post('/api/sync/push', authRequired, async (c) => {
   const userId = userIdOf(c)!
   const body = await c.req.json().catch(() => ({}))
-  const upHistory = db.prepare(`
-    INSERT INTO user_history(user_id, source, video_id, data, updated_at) VALUES(?,?,?,?,?)
-    ON CONFLICT(user_id, source, video_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
-    WHERE excluded.updated_at > user_history.updated_at`)
-  const upSettings = db.prepare(`
-    INSERT INTO user_settings(user_id, data, updated_at) VALUES(?,?,?)
-    ON CONFLICT(user_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
-    WHERE excluded.updated_at > user_settings.updated_at`)
-  db.transaction(() => {
+  const conn = await pool.getConnection()
+  try {
+    await conn.beginTransaction()
     for (const h of body.history ?? []) {
       if (!h.source || !h.video_id || !h.updated_at) continue
-      upHistory.run(userId, String(h.source), String(h.video_id), String(h.data ?? '{}'), Number(h.updated_at))
+      const [rows] = await conn.execute(
+        'SELECT updated_at FROM user_history WHERE user_id = ? AND source = ? AND video_id = ?',
+        [userId, String(h.source), String(h.video_id)],
+      )
+      const cur = (rows as any[])[0]
+      if (!cur || Number(h.updated_at) > cur.updated_at) {
+        const data = String(h.data ?? '{}')
+        const ts = Number(h.updated_at)
+        await conn.execute(
+          `INSERT INTO user_history(user_id, source, video_id, data, updated_at) VALUES(?,?,?,?,?)
+           ON DUPLICATE KEY UPDATE data = ?, updated_at = ?`,
+          [userId, String(h.source), String(h.video_id), data, ts, data, ts],
+        )
+      }
     }
     const s = body.settings
     if (s && s.updated_at) {
-      upSettings.run(userId, String(s.data ?? '{}'), Number(s.updated_at))
+      const [rows] = await conn.execute('SELECT updated_at FROM user_settings WHERE user_id = ?', [
+        userId,
+      ])
+      const cur = (rows as any[])[0]
+      if (!cur || Number(s.updated_at) > cur.updated_at) {
+        const data = String(s.data ?? '{}')
+        const ts = Number(s.updated_at)
+        await conn.execute(
+          `INSERT INTO user_settings(user_id, data, updated_at) VALUES(?,?,?)
+           ON DUPLICATE KEY UPDATE data = ?, updated_at = ?`,
+          [userId, data, ts, data, ts],
+        )
+      }
     }
-  })()
+    await conn.commit()
+  } catch (e) {
+    await conn.rollback()
+    throw e
+  } finally {
+    conn.release()
+  }
   return c.json({ serverTime: Date.now() })
 })
 
@@ -226,7 +270,7 @@ app.post('/api/sync/push', authRequired, async (c) => {
 // 源管理
 // ---------------------------------------------------------------------------
 /** 源列表 (含接口地址, 供管理页用) */
-app.get('/api/sources', (c) => c.json(sourceOps(userIdOf(c)).list()))
+app.get('/api/sources', async (c) => c.json(await sourceOps(userIdOf(c)).list()))
 
 function slugify(name: string): string {
   const s = name
@@ -256,22 +300,22 @@ app.post('/api/sources', sourceWrite, async (c) => {
   if (!name) return c.json({ error: 'name required' }, 400)
   if (!url) return c.json({ error: 'invalid api url' }, 400)
   let id = String(body.id ?? '').trim() || slugify(name)
-  if (ops.get(id)) id = `${id}-${randSuffix()}`
-  ops.upsert({ id, name, api: url.toString() })
+  if (await ops.get(id)) id = `${id}-${randSuffix()}`
+  await ops.upsert({ id, name, api: url.toString() })
   return c.json({ id, name }, 201)
 })
 
 /** 修改源 */
 app.put('/api/sources/:id', sourceWrite, async (c) => {
   const ops = sourceOps(userIdOf(c))
-  const cur = ops.get(c.req.param('id') ?? '')
+  const cur = await ops.get(c.req.param('id') ?? '')
   if (!cur) return c.json({ error: 'not found' }, 404)
   const body = await c.req.json().catch(() => ({}))
   const name = String(body.name ?? cur.name).trim()
   const url = validApiUrl(String(body.api ?? cur.api).trim())
   if (!name) return c.json({ error: 'name required' }, 400)
   if (!url) return c.json({ error: 'invalid api url' }, 400)
-  ops.upsert({ id: cur.id, name, api: url.toString() })
+  await ops.upsert({ id: cur.id, name, api: url.toString() })
   typeCache.delete(cacheKey(c, cur.id))
   return c.json({ id: cur.id, name })
 })
@@ -280,7 +324,7 @@ app.put('/api/sources/:id', sourceWrite, async (c) => {
 app.delete('/api/sources/:id', sourceWrite, async (c) => {
   const ops = sourceOps(userIdOf(c))
   const id = c.req.param('id') ?? ''
-  if (!ops.remove(id)) return c.json({ error: 'not found' }, 404)
+  if (!(await ops.remove(id))) return c.json({ error: 'not found' }, 404)
   typeCache.delete(cacheKey(c, id))
   return c.json({ ok: true })
 })
@@ -324,8 +368,8 @@ app.post('/api/sources/import-url', sourceWrite, async (c) => {
       const api = validApiUrl(String(it?.api ?? it?.url ?? '').trim())
       if (!name || !api) continue
       let sid = slugify(name)
-      if (ops.get(sid)) sid = `${sid}-${randSuffix()}`
-      ops.upsert({ id: sid, name, api: api.toString() })
+      if (await ops.get(sid)) sid = `${sid}-${randSuffix()}`
+      await ops.upsert({ id: sid, name, api: api.toString() })
       added++
     }
     return c.json({ added })
@@ -343,7 +387,7 @@ const cacheKey = (c: Context, id: string) => `${userIdOf(c) ?? 'global'}:${id}`
 /** 每个源的分类 (缓存 1 小时) */
 app.get('/api/types', async (c) => {
   const ops = sourceOps(userIdOf(c))
-  const s = ops.get(c.req.query('source') ?? '')
+  const s = await ops.get(c.req.query('source') ?? '')
   if (!s) return c.json({ error: 'unknown source' }, 400)
   const key = cacheKey(c, s.id)
   const hit = typeCache.get(key)
@@ -357,7 +401,7 @@ app.get('/api/types', async (c) => {
 /** 按分类取影片列表 */
 app.get('/api/list', async (c) => {
   const ops = sourceOps(userIdOf(c))
-  const s = ops.get(c.req.query('source') ?? '')
+  const s = await ops.get(c.req.query('source') ?? '')
   if (!s) return c.json({ error: 'unknown source' }, 400)
   const t = c.req.query('t') ?? ''
   const pg = c.req.query('pg') ?? '1'
@@ -376,11 +420,12 @@ app.get('/api/search', async (c) => {
   const wd = (c.req.query('wd') ?? '').trim()
   if (!wd) return c.json([])
   const ids = (c.req.query('sources') ?? '').split(',').map((x) => x.trim()).filter(Boolean)
-  const targets = (ids.length ? ids.map((id) => ops.get(id)) : ops.list()).filter(
-    (s): s is UserSource => !!s,
-  )
+  const targets: (UserSource | undefined)[] = ids.length
+    ? await Promise.all(ids.map((id) => ops.get(id)))
+    : await ops.list()
+  const valid = targets.filter((s): s is UserSource => !!s)
   const settled = await Promise.allSettled(
-    targets.map(async (s) => {
+    valid.map(async (s) => {
       const data = await fetchJson(toVod(s), { ac: 'videolist', wd, pg: '1' })
       return (data.list ?? []).map((v: any) => normVideo(s, v))
     }),
@@ -393,7 +438,7 @@ app.get('/api/search', async (c) => {
 /** 详情 + 播放地址解析 (vod_play_url 按 $$$ 分线路, # 分集, $ 分隔集名和地址) */
 app.get('/api/detail', async (c) => {
   const ops = sourceOps(userIdOf(c))
-  const s = ops.get(c.req.query('source') ?? '')
+  const s = await ops.get(c.req.query('source') ?? '')
   const ids = c.req.query('ids') ?? ''
   if (!s || !ids) return c.json({ error: 'bad request' }, 400)
   const data = await fetchJson(toVod(s), { ac: 'videolist', ids })
@@ -456,11 +501,11 @@ app.get('/api/proxy', async (c) => {
   return new Response(upstream.body, { status: upstream.status, headers })
 })
 
-app.get('/api/health', (c) =>
+app.get('/api/health', async (c) =>
   c.json({
     ok: true,
     user: c.get('username') ?? null,
-    sources: sourceOps(userIdOf(c)).list().length,
+    sources: (await sourceOps(userIdOf(c)).list()).length,
   }),
 )
 

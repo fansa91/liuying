@@ -56,7 +56,26 @@ liuying/
   (本地改动防抖 2 秒推送, 启动/每 5 分钟/回前台自动拉取, last-write-wins)。
 - 注册时自动继承服务端当前全局源列表。
 - 未登录时保持原来的单机模式 (全局 `sources.json` + ADMIN_TOKEN)。
-- 数据存在 `liuying.db` (SQLite, 与后端同目录), 备份拷走这个文件即可。
+
+## 数据库 (MySQL)
+
+账号、源、历史、设置都存在 MySQL。连接信息走环境变量
+(`DB_HOST` 默认 127.0.0.1, `DB_PORT` 默认 3306, `DB_USER` 默认 root,
+`DB_PASSWORD` 默认空, `DB_NAME` 默认 liuying), 库和表不存在会自动创建,
+只需要 MySQL 用户有建库建表权限。
+
+推荐把敏感配置写进 `/srv/liuying/api/.env` (部署脚本不会覆盖它):
+
+```bash
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_USER=liuying
+DB_PASSWORD=yourpassword
+DB_NAME=liuying
+ADMIN_TOKEN=xxx
+```
+
+然后 `sudo systemctl restart liuying-api` 生效。
 
 ## 本地开发
 

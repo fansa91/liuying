@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import bcrypt from 'bcryptjs'
-import { db } from './db.js'
+import { pool } from './db.js'
 import { store } from './sources.js'
 
 const TOKEN_TTL_MS = 30 * 86400 * 1000
@@ -14,66 +14,79 @@ function validUsername(u: string): boolean {
   return /^[a-zA-Z0-9_\u4e00-\u9fa5]{2,20}$/.test(u)
 }
 
-export function createUser(username: string, password: string): AuthUser {
+export async function createUser(username: string, password: string): Promise<AuthUser> {
   username = username.trim()
   if (!validUsername(username)) throw new Error('用户名需为 2-20 位字母/数字/中文/下划线')
   if (password.length < 4) throw new Error('密码至少 4 位')
-  const exists = db.prepare('SELECT id FROM users WHERE username = ?').get(username)
-  if (exists) throw new Error('用户名已存在')
+  const [exists] = await pool.execute('SELECT id FROM users WHERE username = ?', [username])
+  if ((exists as any[]).length) throw new Error('用户名已存在')
   const id = randomUUID()
   const now = Date.now()
-  const insertUser = db.prepare(
-    'INSERT INTO users(id, username, password_hash, created_at) VALUES(?,?,?,?)',
-  )
-  const insertSource = db.prepare(
-    'INSERT INTO user_sources(id, user_id, source_id, name, api, sort, updated_at) VALUES(?,?,?,?,?,?,?)',
-  )
-  db.transaction(() => {
-    insertUser.run(id, username, bcrypt.hashSync(password, 10), now)
+  const conn = await pool.getConnection()
+  try {
+    await conn.beginTransaction()
+    await conn.execute('INSERT INTO users(id, username, password_hash, created_at) VALUES(?,?,?,?)', [
+      id,
+      username,
+      bcrypt.hashSync(password, 10),
+      now,
+    ])
     // 新账号默认继承服务端全局源列表, 开箱即用
-    store.all().forEach((s, i) => {
-      insertSource.run(randomUUID(), id, s.id, s.name, s.api, i, now)
-    })
-  })()
+    const seeds = store.all()
+    for (let i = 0; i < seeds.length; i++) {
+      const s = seeds[i]
+      await conn.execute(
+        'INSERT INTO user_sources(id, user_id, source_id, name, api, sort, updated_at) VALUES(?,?,?,?,?,?,?)',
+        [randomUUID(), id, s.id, s.name, s.api, i, now],
+      )
+    }
+    await conn.commit()
+  } catch (e) {
+    await conn.rollback()
+    throw e
+  } finally {
+    conn.release()
+  }
   return { id, username }
 }
 
-export function verifyUser(username: string, password: string): AuthUser {
-  const row = db
-    .prepare('SELECT id, username, password_hash FROM users WHERE username = ?')
-    .get(username.trim()) as any
+export async function verifyUser(username: string, password: string): Promise<AuthUser> {
+  const [rows] = await pool.execute('SELECT id, username, password_hash FROM users WHERE username = ?', [
+    username.trim(),
+  ])
+  const row = (rows as any[])[0]
   if (!row || !bcrypt.compareSync(password, row.password_hash)) {
     throw new Error('用户名或密码错误')
   }
   return { id: row.id, username: row.username }
 }
 
-export function createToken(userId: string): string {
+export async function createToken(userId: string): Promise<string> {
   const token = randomBytes(32).toString('hex')
   const now = Date.now()
-  db.prepare('INSERT INTO tokens(token, user_id, created_at, expires_at) VALUES(?,?,?,?)').run(
+  await pool.execute('INSERT INTO tokens(token, user_id, created_at, expires_at) VALUES(?,?,?,?)', [
     token,
     userId,
     now,
     now + TOKEN_TTL_MS,
-  )
+  ])
   return token
 }
 
-export function getUserByToken(token: string): AuthUser | null {
-  const row = db
-    .prepare(
-      'SELECT u.id, u.username, t.expires_at FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.token = ?',
-    )
-    .get(token) as any
+export async function getUserByToken(token: string): Promise<AuthUser | null> {
+  const [rows] = await pool.execute(
+    'SELECT u.id, u.username, t.expires_at FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.token = ?',
+    [token],
+  )
+  const row = (rows as any[])[0]
   if (!row) return null
   if (row.expires_at < Date.now()) {
-    db.prepare('DELETE FROM tokens WHERE token = ?').run(token)
+    await pool.execute('DELETE FROM tokens WHERE token = ?', [token])
     return null
   }
   return { id: row.id, username: row.username }
 }
 
-export function revokeToken(token: string): void {
-  db.prepare('DELETE FROM tokens WHERE token = ?').run(token)
+export async function revokeToken(token: string): Promise<void> {
+  await pool.execute('DELETE FROM tokens WHERE token = ?', [token])
 }

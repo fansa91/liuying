@@ -9,6 +9,15 @@ WorkingDirectory=@DIR@/api
 ExecStart=@NODE@ dist/index.js
 Environment=NODE_ENV=production
 Environment=PORT=@PORT@
+# 敏感配置 (含 MySQL 连接信息) 写进下面的 .env 文件, 不会随部署被覆盖
+# 示例 (@DIR@/api/.env):
+#   DB_HOST=127.0.0.1
+#   DB_PORT=3306
+#   DB_USER=root
+#   DB_PASSWORD=yourpassword
+#   DB_NAME=liuying
+#   ADMIN_TOKEN=xxx
+EnvironmentFile=-@DIR@/api/.env
 Restart=always
 RestartSec=5
 
