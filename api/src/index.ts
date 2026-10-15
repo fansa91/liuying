@@ -1,13 +1,19 @@
 import { serve } from '@hono/node-server'
-import { Hono } from 'hono'
+import { Hono, type Context, type Next } from 'hono'
 import { cors } from 'hono/cors'
-import { loadSources, type VodSource } from './sources.js'
+import { store, type VodSource } from './sources.js'
 
 const app = new Hono()
 app.use('/api/*', cors())
 
-const sources = loadSources()
-const byId = new Map(sources.map((s) => [s.id, s]))
+/** 写操作鉴权: 设置了 ADMIN_TOKEN 才强制要求 x-admin-token 请求头 */
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? ''
+async function admin(c: Context, next: Next) {
+  if (ADMIN_TOKEN && c.req.header('x-admin-token') !== ADMIN_TOKEN) {
+    return c.json({ error: 'unauthorized' }, 401)
+  }
+  await next()
+}
 
 async function fetchJson(source: VodSource, params: Record<string, string>): Promise<any> {
   const u = new URL(source.api)
@@ -47,13 +53,83 @@ function normVideo(s: VodSource, v: any): VideoItem {
   }
 }
 
-/** 源列表 */
-app.get('/api/sources', (c) => c.json(sources.map((s) => ({ id: s.id, name: s.name }))))
+/** 源列表 (含接口地址, 供管理页用) */
+app.get('/api/sources', (c) => c.json(store.all()))
+
+function slugify(name: string): string {
+  const s = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return s || 'src'
+}
+
+function validApiUrl(api: string): URL | null {
+  try {
+    const u = new URL(api)
+    return /^https?:$/.test(u.protocol) ? u : null
+  } catch {
+    return null
+  }
+}
+
+/** 添加源 */
+app.post('/api/sources', admin, async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const name = String(body.name ?? '').trim()
+  const url = validApiUrl(String(body.api ?? '').trim())
+  if (!name) return c.json({ error: 'name required' }, 400)
+  if (!url) return c.json({ error: 'invalid api url' }, 400)
+  let id = String(body.id ?? '').trim() || slugify(name)
+  if (store.get(id)) id = `${id}-${Math.random().toString(36).slice(2, 6)}`
+  const src: VodSource = { id, name, api: url.toString(), timeoutMs: 15000 }
+  store.upsert(src)
+  return c.json({ id: src.id, name: src.name }, 201)
+})
+
+/** 修改源 */
+app.put('/api/sources/:id', admin, async (c) => {
+  const cur = store.get(c.req.param('id') ?? '')
+  if (!cur) return c.json({ error: 'not found' }, 404)
+  const body = await c.req.json().catch(() => ({}))
+  const name = String(body.name ?? cur.name).trim()
+  const url = validApiUrl(String(body.api ?? cur.api).trim())
+  if (!name) return c.json({ error: 'name required' }, 400)
+  if (!url) return c.json({ error: 'invalid api url' }, 400)
+  const src: VodSource = { ...cur, name, api: url.toString() }
+  store.upsert(src)
+  typeCache.delete(cur.id)
+  return c.json({ id: src.id, name: src.name })
+})
+
+/** 删除源 */
+app.delete('/api/sources/:id', admin, async (c) => {
+  const id = c.req.param('id') ?? ''
+  if (!store.remove(id)) return c.json({ error: 'not found' }, 404)
+  typeCache.delete(id)
+  return c.json({ ok: true })
+})
+
+/** 测试源连通性: 尝试拉取分类, 返回分类数量 */
+app.post('/api/sources/test', admin, async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const url = validApiUrl(String(body.api ?? '').trim())
+  if (!url) return c.json({ ok: false, error: '接口地址无效' })
+  try {
+    const data = await fetchJson(
+      { id: 'test', name: 'test', api: url.toString(), timeoutMs: 15000 },
+      { ac: 'list' },
+    )
+    return c.json({ ok: true, types: (data.class ?? []).length })
+  } catch (e: any) {
+    return c.json({ ok: false, error: String(e?.message ?? e) })
+  }
+})
 
 /** 每个源的分类 (缓存 1 小时) */
 const typeCache = new Map<string, { at: number; data: { id: string; name: string }[] }>()
 app.get('/api/types', async (c) => {
-  const s = byId.get(c.req.query('source') ?? '')
+  const s = store.get(c.req.query('source') ?? '')
   if (!s) return c.json({ error: 'unknown source' }, 400)
   const hit = typeCache.get(s.id)
   if (hit && Date.now() - hit.at < 3600_000) return c.json(hit.data)
@@ -65,7 +141,7 @@ app.get('/api/types', async (c) => {
 
 /** 按分类取影片列表 */
 app.get('/api/list', async (c) => {
-  const s = byId.get(c.req.query('source') ?? '')
+  const s = store.get(c.req.query('source') ?? '')
   if (!s) return c.json({ error: 'unknown source' }, 400)
   const t = c.req.query('t') ?? ''
   const pg = c.req.query('pg') ?? '1'
@@ -83,7 +159,7 @@ app.get('/api/search', async (c) => {
   const wd = (c.req.query('wd') ?? '').trim()
   if (!wd) return c.json([])
   const ids = (c.req.query('sources') ?? '').split(',').map((x) => x.trim()).filter(Boolean)
-  const targets = (ids.length ? ids.map((id) => byId.get(id)) : [...byId.values()]).filter(
+  const targets = (ids.length ? ids.map((id) => store.get(id)) : store.all()).filter(
     (s): s is VodSource => !!s,
   )
   const settled = await Promise.allSettled(
@@ -99,7 +175,7 @@ app.get('/api/search', async (c) => {
 
 /** 详情 + 播放地址解析 (vod_play_url 按 $$$ 分线路, # 分集, $ 分隔集名和地址) */
 app.get('/api/detail', async (c) => {
-  const s = byId.get(c.req.query('source') ?? '')
+  const s = store.get(c.req.query('source') ?? '')
   const ids = c.req.query('ids') ?? ''
   if (!s || !ids) return c.json({ error: 'bad request' }, 400)
   const data = await fetchJson(s, { ac: 'videolist', ids })
@@ -161,8 +237,8 @@ app.get('/api/proxy', async (c) => {
   return new Response(upstream.body, { status: upstream.status, headers })
 })
 
-app.get('/api/health', (c) => c.json({ ok: true, sources: sources.length }))
+app.get('/api/health', (c) => c.json({ ok: true, sources: store.all().length }))
 
 const port = Number(process.env.PORT ?? 3000)
-console.log(`[liuying] api listening on :${port}, ${sources.length} sources`)
+console.log(`[liuying] api listening on :${port}, ${store.all().length} sources`)
 serve({ fetch: app.fetch, port })

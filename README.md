@@ -32,6 +32,11 @@ liuying/
 | `GET /api/proxy?url=` | 通用代理, m3u8 会重写分片地址回本代理 |
 
 源配置: `api/sources.json` (AppleCMS 采集接口格式), 见 `sources.json.example`。
+也可以直接在 web 端「源管理」页面增删改查 (支持测试连接), 改完即时生效, 无需重启。
+
+> 安全提示: 写接口 (增/删/改/测试) 默认无鉴权。如果 `api` 会被公网直接访问,
+> 建议在 systemd 的 `Environment=` 里加 `ADMIN_TOKEN=xxx`, 之后 web 端「源管理」
+> 页顶部填入同样的密钥才能操作 (存在浏览器 localStorage)。
 
 ## 本地开发
 

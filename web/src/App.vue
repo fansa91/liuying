@@ -15,6 +15,7 @@
       <v-list nav>
         <v-list-item prepend-icon="mdi-home" title="首页" to="/" exact />
         <v-list-item prepend-icon="mdi-magnify" title="搜索" to="/search" />
+        <v-list-item prepend-icon="mdi-database-cog" title="源管理" to="/sources" />
       </v-list>
     </v-navigation-drawer>
 
