@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=@USER@
 WorkingDirectory=@DIR@/api
-ExecStart=/usr/bin/node dist/index.js
+ExecStart=@NODE@ dist/index.js
 Environment=NODE_ENV=production
 Environment=PORT=@PORT@
 Restart=always

@@ -8,7 +8,7 @@
 #   2) 本地包: sudo ./deploy.sh --dir /srv/liuying \
 #                --web-dist ./web-dist --api-dist ./api-dist
 #
-# 可选: --repo owner/name --tag latest --user liuying --port 3000
+# 可选: --repo owner/name --tag latest --user root --port 3000 --node /usr/bin/node
 # Caddy 请手动配置, 参考 deploy/Caddyfile (注意把 /api 反代到 --port)
 #
 set -euo pipefail
@@ -19,8 +19,9 @@ API_DIST=""
 DOWNLOAD=0
 REPO="fansa91/liuying"
 TAG="latest"
-USER="liuying"
+USER="root"
 PORT="3000"
+NODE_BIN=""
 
 usage() {
   cat <<'EOF'
@@ -37,8 +38,9 @@ usage() {
   --tag       Release 标签 (默认 latest, 仅 --download 用)
   --web-dist  前端 dist 目录 (默认 <repo>/web/dist)
   --api-dist  后端目录, 里面需有 dist/ + package.json (默认 <repo>/api)
-  --user      运行用户 (默认 liuying, 不存在会自动创建)
+  --user      运行用户 (默认 root, 不存在会自动创建)
   --port      后端端口 (默认 3000)
+  --node      node 可执行文件路径 (默认自动探测 command -v node)
 
 Caddy 请手动配置, 参考 deploy/Caddyfile (注意把 /api 反代到 --port)
 EOF
@@ -54,6 +56,7 @@ while [[ $# -gt 0 ]]; do
     --tag)      TAG="$2";      shift 2 ;;
     --user)     USER="$2";     shift 2 ;;
     --port)     PORT="$2";     shift 2 ;;
+    --node)     NODE_BIN="$2"; shift 2 ;;
     -h|--help)  usage; exit 0 ;;
     *) echo "未知参数: $1"; usage; exit 1 ;;
   esac
@@ -103,7 +106,13 @@ fi
 [[ -d "$WEB_DIST" ]] || { echo "找不到前端 dist: $WEB_DIST"; exit 1; }
 [[ -d "$API_DIST/dist" ]] || { echo "找不到后端构建产物: $API_DIST/dist"; exit 1; }
 [[ -f "$SERVICE_TEMPLATE" ]] || { echo "找不到 systemd 模板: $SERVICE_TEMPLATE"; exit 1; }
-command -v node >/dev/null || { echo "服务器需要先安装 node"; exit 1; }
+
+# node 路径自动探测
+if [[ -z "$NODE_BIN" ]]; then
+  NODE_BIN="$(command -v node || true)"
+fi
+[[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] || { echo "找不到可执行的 node, 请先安装 node 或用 --node 指定路径"; exit 1; }
+echo "使用 node: $NODE_BIN"
 
 echo "==> 部署到 $DIR"
 
@@ -133,11 +142,13 @@ if [[ ! -f "$DIR/api/sources.json" ]]; then
   fi
   echo "已生成 $DIR/api/sources.json, 请填入你的源后 restart 服务"
 fi
-chown -R "$USER:$USER" "$DIR"
-echo "后端 -> $DIR/api (端口 $PORT)"
+if [[ "$USER" != "root" ]]; then
+  chown -R "$USER:$USER" "$DIR"
+fi
+echo "后端 -> $DIR/api (端口 $PORT, 用户 $USER)"
 
 # systemd
-sed -e "s|@DIR@|$DIR|g" -e "s|@USER@|$USER|g" -e "s|@PORT@|$PORT|g" \
+sed -e "s|@DIR@|$DIR|g" -e "s|@USER@|$USER|g" -e "s|@PORT@|$PORT|g" -e "s|@NODE@|$NODE_BIN|g" \
   "$SERVICE_TEMPLATE" > /etc/systemd/system/liuying-api.service
 systemctl daemon-reload
 systemctl enable liuying-api.service >/dev/null
