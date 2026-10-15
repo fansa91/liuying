@@ -1,0 +1,14 @@
+# 把 play.example.com 换成你的域名
+play.example.com {
+	root * /srv/liuying/web
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	handle {
+		# SPA history 路由: 刷新不 404
+		try_files {path} /index.html
+		file_server
+	}
+}
