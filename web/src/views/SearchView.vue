@@ -37,14 +37,8 @@
       </h3>
       <v-row>
         <v-col v-for="v in g.items" :key="v.id" cols="4" sm="3" md="2">
-          <v-card @click="goPlay(v)">
-            <v-img :src="v.pic" aspect-ratio="3/4" cover>
-              <template #error>
-                <v-sheet height="100%" color="surface-container" class="d-flex align-center justify-center">
-                  <v-icon>mdi-image-off</v-icon>
-                </v-sheet>
-              </template>
-            </v-img>
+          <v-card @click="goDetail(v)">
+            <QueuedImage :src="v.pic" aspect="3/4" />
             <v-card-text class="pa-2">
               <div class="text-truncate font-weight-medium">{{ v.name }}</div>
               <div class="text-caption text-medium-emphasis text-truncate">{{ v.remarks }}</div>
@@ -64,6 +58,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, type SourceInfo, type VideoItem } from '../api'
+import QueuedImage from '../components/QueuedImage.vue'
 
 const router = useRouter()
 const sources = ref<SourceInfo[]>([])
@@ -103,8 +98,8 @@ async function doSearch() {
   }
 }
 
-function goPlay(v: VideoItem) {
-  router.push({ name: 'play', query: { source: v.source, id: v.id } })
+function goDetail(v: VideoItem) {
+  router.push({ name: 'detail', query: { source: v.source, id: v.id } })
 }
 
 onMounted(async () => {

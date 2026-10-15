@@ -7,7 +7,10 @@ import Artplayer from 'artplayer'
 import Hls from 'hls.js'
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
-const props = defineProps<{ url: string; title?: string }>()
+const props = defineProps<{ url: string; title?: string; startPosition?: number }>()
+const emit = defineEmits<{
+  (e: 'position', payload: { url: string; position: number }): void
+}>()
 const container = ref<HTMLDivElement>()
 let art: Artplayer | null = null
 
@@ -41,6 +44,24 @@ function create() {
       },
     },
   })
+
+  // 断点续播 + 进度上报 (给播放历史用)
+  let seeked = false
+  let lastEmit = 0
+  const emitPos = () => {
+    lastEmit = Math.floor(art!.currentTime)
+    emit('position', { url: props.url, position: lastEmit })
+  }
+  art.on('video:loadedmetadata', () => {
+    if (!seeked && (props.startPosition ?? 0) > 1) {
+      seeked = true
+      art!.seek(props.startPosition!)
+    }
+  })
+  art.on('video:timeupdate', () => {
+    if (Math.floor(art!.currentTime) - lastEmit >= 5) emitPos()
+  })
+  art.on('video:pause', emitPos)
 }
 
 onMounted(create)

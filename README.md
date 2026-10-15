@@ -9,8 +9,13 @@
 liuying/
 ├── web/                        # 前端 (Vite + Vue3 + Vuetify3 + ArtPlayer)
 │   └── src/
-│       ├── views/              # 首页(分类) / 搜索(多源) / 播放页
-│       ├── components/Player.vue  # ArtPlayer + hls.js 封装
+│       ├── views/              # 首页(分类) / 搜索(多源) / 详情页 / 播放页 / 历史 / 源管理 / 设置
+│       ├── components/
+│       │   ├── Player.vue      # ArtPlayer + hls.js 封装 (断点续播/进度上报)
+│       │   └── QueuedImage.vue # 图片队列加载 (并发限制6 + 滚动懒加载)
+│       ├── settings.ts         # 全局设置 (localStorage 持久化)
+│       ├── theme.ts            # M3 seed color 生成完整 light/dark 配色
+│       ├── history.ts          # 播放历史 (localStorage, 断点续播)
 │       └── api.ts              # 后端接口调用
 ├── api/                        # 后端 (Hono + TypeScript)
 │   └── src/index.ts            # /api/sources|types|list|search|detail|proxy
@@ -33,6 +38,12 @@ liuying/
 
 源配置: `api/sources.json` (AppleCMS 采集接口格式), 见 `sources.json.example`。
 也可以直接在 web 端「源管理」页面增删改查 (支持测试连接), 改完即时生效, 无需重启。
+
+前端功能:
+- 设置页: 图片/播放链接是否经服务器代理, 主题模式 (浅色/深色/跟随系统),
+  M3 主题色 (seed color 生成完整配色)
+- 详情页: 海报/简介/线路/分集, 有历史记录时显示「继续播放」
+- 播放历史: 记录看到第几集及集内进度, 打开自动断点续播
 
 > 安全提示: 写接口 (增/删/改/测试) 默认无鉴权。如果 `api` 会被公网直接访问,
 > 建议在 systemd 的 `Environment=` 里加 `ADMIN_TOKEN=xxx`, 之后 web 端「源管理」
